@@ -1,6 +1,7 @@
 import { ref } from "vue";
 import {
   bootstrapPluginSession,
+  decodeJwt,
   type SessionHandle,
 } from "@karyl-chan/plugin-sdk/web";
 import { setApi, setGameSession } from "../api";
@@ -51,16 +52,18 @@ export async function bootstrapApp(): Promise<void> {
     return;
   }
 
+  // Quest-game's link URLs don't carry `?surface=` — the bot CLI
+  // emits `/?token=…&c=…&s=…`. Peek at the URL token's capabilities
+  // ourselves to decide whether to ask the SDK for the JWT-exchange
+  // flow (manage tier, refreshable pair) or the direct-bearer flow
+  // (game tier, single JWT used as Bearer).
+  const urlToken = new URLSearchParams(window.location.search).get("token");
+  const urlClaims = urlToken ? decodeJwt(urlToken) : null;
+  const wantsExchange = urlClaims ? hasManageCaps(urlClaims) : false;
+
   const handle = await bootstrapPluginSession({
     pluginKey: PLUGIN_KEY,
-    surfaces: {
-      manage: "manage",
-      game: "session",
-    },
-    // Quest-game's link URLs don't carry `?surface=` — the bot CLI
-    // emits `/?token=…&c=…&s=…`. Derive surface from the JWT instead.
-    surfaceFromClaims: (claims) =>
-      hasManageCaps(claims) ? "manage" : "game",
+    exchangeJwt: wantsExchange,
     extraUrlParams: ["c", "s"],
     onAccessDenied: (msg) =>
       deny(msg || "存取遭拒，請重新取得連結。"),
@@ -68,10 +71,6 @@ export async function bootstrapApp(): Promise<void> {
   sessionHandle = handle;
   setApi(handle.api);
 
-  // Authoritative deny path — onAccessDenied may have already fired
-  // synchronously, but branch on the handle's `denied` field too so
-  // unrecoverable boot states (malformed token, failed manage exchange)
-  // surface consistently.
   if (handle.denied) {
     if (mode.value !== "denied") {
       deny(handle.deniedReason ?? "存取遭拒，請重新取得連結。");
@@ -79,17 +78,17 @@ export async function bootstrapApp(): Promise<void> {
     return;
   }
 
-  if (handle.mode === "none") {
+  if (!handle.isAuthenticated) {
     deny("請在 Discord 內透過 /quest-game webui 或 /quest-game manage 取得連結。");
     return;
   }
 
   // Tab reload — SDK restored the auth state from sessionStorage but
-  // has no decoded claims for us. Manage resumes cleanly; game needs
-  // the channel + session ids that were stripped from the original
-  // URL (they aren't kept by the SDK), so re-prompt the user.
+  // has no decoded claims for us. Manage tier resumes cleanly (the
+  // pair survived); game tier needs `?c=` / `?s=` which were stripped,
+  // so re-prompt the user.
   if (!handle.claims) {
-    if (handle.mode === "manage") {
+    if (handle.hasRefreshPair) {
       mode.value = "manage";
       return;
     }
@@ -97,20 +96,15 @@ export async function bootstrapApp(): Promise<void> {
     return;
   }
 
-  // Fresh URL token — handle.surface is whatever the resolver picked.
-  if (handle.surface === "manage") {
-    // Double-check the cap — surface might be "manage" even when the
-    // token lacks the manage cap if a future change updates the
-    // resolver but exchangeManageJwt still works. Belt-and-braces.
-    if (!hasManageCaps(handle.claims)) {
-      deny("此連結不具備管理權限。");
-      return;
-    }
+  // Fresh URL token — we already decoded its caps above to pick the
+  // flow. Branch on the same signal so the routing decision matches
+  // what the SDK actually did.
+  if (wantsExchange) {
     mode.value = "manage";
     return;
   }
 
-  // Game-board surface — needs `?c=<channelId>` from the link.
+  // Game-board tier — needs `?c=<channelId>` from the link.
   const channelId = handle.urlParams["c"];
   if (!channelId) {
     deny("遊戲板連結缺少頻道資訊，請重新執行 /quest-game webui。");
