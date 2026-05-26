@@ -13,6 +13,7 @@
  * the call log isolated).
  */
 import type { ComponentContext } from "@karyl-chan/plugin-sdk";
+import { createPluginRpc } from "@karyl-chan/plugin-sdk";
 import { wireRuntime, type BotRpc, type Logger } from "../flow/runtime.js";
 import { onComponent } from "../flow/dispatcher.js";
 import {
@@ -62,21 +63,35 @@ export function installFakeRuntime(): InstalledHarness {
   const logs: LogEntry[] = [];
   let sendShouldFail = false;
 
-  const botRpc: BotRpc = async (path, body) => {
+  // Single call tracker. Both the legacy botRpc fake AND the typed
+  // facade route through this lambda so `harness.callsTo(...)` keeps
+  // matching whether a call site uses runtime().botRpc(...) or
+  // runtime().discord.*. messages.send is the only path that needs
+  // a non-trivial response (downstream tests read the returned id).
+  const callRpc = async (
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> => {
     calls.push({ path, body });
     if (path === "/api/plugin/messages.send") {
-      if (sendShouldFail) return null;
+      if (sendShouldFail) {
+        throw new Error("simulated messages.send failure");
+      }
       const channelId =
         (body as { channel_id?: string } | undefined)?.channel_id ?? "unknown";
       _msgCounter++;
       return { id: `msg-${_msgCounter}`, channel_id: channelId };
     }
-    if (path === "/api/plugin/messages.edit") return { ok: true };
-    if (path === "/api/plugin/messages.delete") return { ok: true };
-    if (path === "/api/plugin/interactions.respond") return { ok: true };
-    if (path === "/api/plugin/interactions.followup") return { ok: true };
     return { ok: true };
   };
+  const botRpc: BotRpc = async (path, body) => {
+    try {
+      return await callRpc(path, body);
+    } catch {
+      return null;
+    }
+  };
+  const rpc = createPluginRpc(callRpc);
 
   const log: Logger = {
     info: (msg, meta) => logs.push({ level: "info", msg, meta }),
@@ -86,6 +101,8 @@ export function installFakeRuntime(): InstalledHarness {
 
   wireRuntime({
     botRpc,
+    discord: rpc.discord,
+    voice: rpc.voice,
     log,
     publicBaseUrl: () => "http://test.local",
   });
@@ -195,6 +212,15 @@ export type ClickArgs = {
 
 /** Build a synthetic ComponentContext matching the SDK's interface. */
 export function fakeClickContext(args: ClickArgs): ComponentContext {
+  // Component-level RPC stub: matches the harness's runtime fake.
+  // Every call records into the per-test `calls` log via the closure
+  // already wired by installFakeRuntime — but for synthetic clicks
+  // dispatched OUTSIDE that closure (rare), we route through a
+  // no-op RpcCaller. Most tests install the runtime first, so ctx
+  // calls inherit the same tracker via runtime().botRpc.
+  const noopCall = async (_path: string, _body?: unknown): Promise<unknown> =>
+    null;
+  const rpc = createPluginRpc(noopCall);
   return {
     pluginKey: "karyl-quest-game",
     customId: `kc:karyl-quest-game:${args.componentId}${args.tail ? `:${args.tail}` : ""}`,
@@ -218,6 +244,8 @@ export function fakeClickContext(args: ClickArgs): ComponentContext {
     },
     publicBaseUrl: "http://test.local",
     botRpc: async () => null,
+    discord: rpc.discord,
+    voice: rpc.voice,
   };
 }
 

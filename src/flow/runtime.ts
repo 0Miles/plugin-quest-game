@@ -11,6 +11,8 @@
  * paths run after start, so they're safe.
  */
 
+import type { Discord, Voice } from "@karyl-chan/plugin-sdk";
+
 export interface Logger {
   info(msg: string, meta?: Record<string, unknown>): void;
   warn(msg: string, meta?: Record<string, unknown>): void;
@@ -24,6 +26,10 @@ export type BotRpc = (
 
 interface Runtime {
   botRpc: BotRpc;
+  /** Typed Discord RPC facade (Lockdown L-2). */
+  discord: Discord;
+  /** Typed Voice RPC facade. */
+  voice: Voice;
   log: Logger;
   /**
    * Browser-reachable base URL for this plugin's HTTP surface

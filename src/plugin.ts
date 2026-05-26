@@ -8,6 +8,7 @@ import {
   type ComponentContext,
   type ComponentReply,
   type CommandContext,
+  type MessageActionRow,
 } from "@karyl-chan/plugin-sdk";
 import { EMBED_COLOR, PLUGIN_KEY, PLUGIN_NAME, PLUGIN_VERSION } from "./constants.js";
 import { t } from "./i18n/index.js";
@@ -20,7 +21,7 @@ import {
   renderCurrentStageBoard,
   renderDealReveal,
 } from "./flow/stages.js";
-import { deleteMessage, sendMessage } from "./flow/discord.js";
+import { asMessageRows, deleteMessage, sendMessage } from "./flow/discord.js";
 import { playerByUserId } from "./game/state.js";
 import {
   getEndedGame,
@@ -45,8 +46,11 @@ const QUEST_GAME_PUBLIC_URL_ENV = process.env.QUEST_GAME_PUBLIC_URL
 setPublicUrlEnvFallback(QUEST_GAME_PUBLIC_URL_ENV);
 
 /** Discord component-v1 action row with a single Link button. */
-function linkButtonRow(label: string, url: string): unknown {
-  return { type: 1, components: [{ type: 2, style: 5, label, url }] };
+function linkButtonRow(label: string, url: string): MessageActionRow {
+  return {
+    type: 1,
+    components: [{ type: 2, style: 5, label, url }],
+  } as unknown as MessageActionRow;
 }
 
 /**
@@ -270,9 +274,11 @@ export function buildPlugin() {
                 );
                 return {
                   embeds: [reveal.embed],
-                  components: cardLink
-                    ? [...dealRevealComponents(), cardLink]
-                    : dealRevealComponents(),
+                  components: asMessageRows(
+                    cardLink
+                      ? [...dealRevealComponents(), cardLink]
+                      : dealRevealComponents(),
+                  ),
                   ephemeral: true,
                   ...(reveal.attachment
                     ? { attachments: [reveal.attachment] }
@@ -351,7 +357,7 @@ export function buildPlugin() {
                   // game, but it never repaints — it's a snapshot.
                   return {
                     embeds: board.embeds,
-                    components: board.components,
+                    components: asMessageRows(board.components),
                     ephemeral: true,
                     ...(board.attachments
                       ? { attachments: board.attachments }
@@ -421,7 +427,7 @@ export function buildPlugin() {
                   : t(undefined, "webui.descriptionSpectator");
                 return {
                   content: `🎲 **${t(undefined, "webui.title")}**\n${intro}`,
-                  components: [linkRow],
+                  components: asMessageRows([linkRow]),
                   ephemeral: true,
                 };
               }

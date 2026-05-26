@@ -12,6 +12,8 @@ const started = await buildPlugin().start();
 // they don't all have to thread `started` through every call site.
 wireRuntime({
   botRpc: started.botRpc,
+  discord: started.discord,
+  voice: started.voice,
   log: {
     info: (msg, meta) => started.server.log.info(meta ?? {}, msg),
     warn: (msg, meta) => started.server.log.warn(meta ?? {}, msg),

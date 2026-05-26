@@ -1,3 +1,8 @@
+import type {
+  APIEmbed,
+  MessageActionRow,
+  MessageAttachment,
+} from "@karyl-chan/plugin-sdk";
 import { runtime } from "./runtime.js";
 
 /**
@@ -42,6 +47,17 @@ export interface DiscordActionRow {
 export type Components = DiscordActionRow[];
 
 /**
+ * Cast our (structurally-correct but not-discriminated-union) row
+ * literals to the SDK's strict `MessageActionRow[]` at the boundary
+ * where a `CommandReply` / `ComponentReply` slot expects it. The
+ * runtime payload is identical — Discord doesn't care about TS's
+ * discriminated-union encoding.
+ */
+export function asMessageRows(rows: Components): MessageActionRow[] {
+  return rows as unknown as MessageActionRow[];
+}
+
+/**
  * A file the bot should attach to a message. `path` is a path on
  * THIS plugin's own HTTP surface (e.g. `/art/merlin.png`); the bot
  * fetches it over the internal bot↔plugin network and uploads the
@@ -80,6 +96,11 @@ export function artAttachment(filename: string): {
  * Send a new message to a channel. Returns the message id on success,
  * or null on failure (RPC blip, missing permission). Caller should
  * treat null as "give up gracefully" — it's the SDK contract.
+ *
+ * Lockdown L-2: routed through the typed `runtime().discord.messages.*`
+ * facade. The facade throws BotRpcError on failure; we collapse it to
+ * `null` here to preserve every caller's existing graceful-fallback
+ * branch.
  */
 export async function sendMessage(opts: {
   channelId: string;
@@ -88,18 +109,28 @@ export async function sendMessage(opts: {
   components?: Components;
   attachments?: DiscordAttachment[];
 }): Promise<{ id: string; channelId: string } | null> {
-  const res = (await runtime().botRpc("/api/plugin/messages.send", {
-    channel_id: opts.channelId,
-    content: opts.content,
-    embeds: opts.embeds,
-    components: opts.components,
-    allowed_mentions: { parse: [] },
-    ...(opts.attachments && opts.attachments.length > 0
-      ? { attachments: opts.attachments }
-      : {}),
-  })) as { id?: string; channel_id?: string } | null;
-  if (!res || !res.id || !res.channel_id) return null;
-  return { id: res.id, channelId: res.channel_id };
+  try {
+    const res = await runtime().discord.messages.send({
+      channelId: opts.channelId,
+      content: opts.content,
+      embeds: opts.embeds as unknown as APIEmbed[] | undefined,
+      components: opts.components
+        ? asMessageRows(opts.components)
+        : undefined,
+      allowedMentions: { users: [], roles: [] },
+      ...(opts.attachments && opts.attachments.length > 0
+        ? {
+            attachments: opts.attachments as unknown as MessageAttachment[],
+          }
+        : {}),
+    });
+    return { id: res.id, channelId: res.channel_id };
+  } catch (err) {
+    runtime().log.warn("quest-game: messages.send failed", {
+      err: (err as Error).message,
+    });
+    return null;
+  }
 }
 
 /** Patch an existing message in place. */
@@ -110,14 +141,20 @@ export async function editMessage(opts: {
   embeds?: DiscordEmbed[];
   components?: Components;
 }): Promise<boolean> {
-  const res = await runtime().botRpc("/api/plugin/messages.edit", {
-    channel_id: opts.channelId,
-    message_id: opts.messageId,
-    content: opts.content,
-    embeds: opts.embeds,
-    components: opts.components,
-  });
-  return res !== null;
+  try {
+    await runtime().discord.messages.edit({
+      channelId: opts.channelId,
+      messageId: opts.messageId,
+      content: opts.content,
+      embeds: opts.embeds as unknown as APIEmbed[] | undefined,
+      components: opts.components
+        ? asMessageRows(opts.components)
+        : undefined,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Delete a message (best-effort; missing / already-deleted is fine). */
@@ -125,10 +162,12 @@ export async function deleteMessage(opts: {
   channelId: string;
   messageId: string;
 }): Promise<void> {
-  await runtime().botRpc("/api/plugin/messages.delete", {
-    channel_id: opts.channelId,
-    message_id: opts.messageId,
-  });
+  await runtime()
+    .discord.messages.delete({
+      channelId: opts.channelId,
+      messageId: opts.messageId,
+    })
+    .catch(() => undefined);
 }
 
 /**
