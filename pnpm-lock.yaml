@@ -12,8 +12,8 @@ importers:
         specifier: ^9.0.3
         version: 9.4.0
       '@karyl-chan/plugin-sdk':
-        specifier: ^0.4.0
-        version: 0.4.0(discord-api-types@0.38.48)(vue@3.5.34(typescript@5.9.3))
+        specifier: ^0.5.0
+        version: 0.5.0(discord-api-types@0.38.48)(vue@3.5.34(typescript@5.9.3))
       cropperjs:
         specifier: '1'
         version: 1.6.2
@@ -426,8 +426,8 @@ packages:
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
-  '@karyl-chan/plugin-sdk@0.4.0':
-    resolution: {integrity: sha512-JclfEsMVvP+dMfC7kovoBjes71YUpVVDbKU009jDKQa/HtEDScr2XPF9PHUgm8LYU5fEqC/oRacPo3szkGcCRQ==}
+  '@karyl-chan/plugin-sdk@0.5.0':
+    resolution: {integrity: sha512-8pl9gbmfyYWMem1wy+MEbMteiZk+l3HZHBxTO7WYsO63IzSld8/E7q70Jd9E19x/31fQR+/E/JjtffeCPcggEg==}
     engines: {node: '>=22'}
     peerDependencies:
       discord-api-types: '>=0.38.0 <0.39.0'
@@ -1291,7 +1291,7 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@karyl-chan/plugin-sdk@0.4.0(discord-api-types@0.38.48)(vue@3.5.34(typescript@5.9.3))':
+  '@karyl-chan/plugin-sdk@0.5.0(discord-api-types@0.38.48)(vue@3.5.34(typescript@5.9.3))':
     dependencies:
       discord-api-types: 0.38.48
       fastify: 5.8.5

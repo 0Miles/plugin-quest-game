@@ -1,236 +1,40 @@
-// Browser-side helper for the QuestGame admin SPA. Manage-only — there
-// is no per-guild "session" surface for ordinary players (the game
-// is driven entirely by in-channel buttons).
-//
-// Flow:
-//   1. SPA reads `?token=…` (the bot's 15-min plugin-session JWT).
-//   2. POSTs to /api/manage/exchange → receives plugin-issued
-//      access (5 min) + refresh (24 h) pair.
-//   3. Lives on the access token; on 401 transparently /refreshes
-//      once and retries the request.
-//   4. Tab reload restores the pair from sessionStorage.
+// Browser-side API client for the QuestGame SPA. Built on
+// @karyl-chan/plugin-sdk/web's `bootstrapPluginSession` orchestrator —
+// JWT decode, manage exchange, refresh, sessionStorage restore and
+// the authed fetch wrapper all live inside the SessionHandle owned by
+// `use-app-session.ts`. This module exposes the typed feature
+// endpoints; it receives the `PluginApi` via `setApi` once bootstrap
+// resolves and the game-board session ids via `setGameSession`.
 
-const API_BASE = window.location.origin + (window.__PLUGIN_BASE__ || "");
+import {
+  API_BASE,
+  type PluginApi,
+} from "@karyl-chan/plugin-sdk/web";
 
-const MANAGE_TOKENS_KEY = "quest-game_manage_tokens";
+import type { GameSnapshotView, ManualData } from "./game-types";
 
-export interface ManageTokens {
-  accessToken: string;
-  refreshToken: string;
-  accessExpiresAt: number;
-  refreshExpiresAt: number;
+// ── Auth + bootstrap handles ──────────────────────────────────────────
+// Wired at bootstrap time from `use-app-session.ts` — `setApi` from
+// `bootstrap.api`, and `setGameSession` from the URL params the
+// bootstrap stripped. Both throw on access before bootstrap resolves
+// (boot bug — bootstrap must finish before any view consumes them).
+
+let _api: PluginApi | null = null;
+
+export function setApi(api: PluginApi): void {
+  _api = api;
 }
 
-let _manage: ManageTokens | null = null;
-let _onDenied: ((msg: string) => void) | null = null;
-
-export function onAccessDenied(handler: (msg: string) => void): void {
-  _onDenied = handler;
-}
-
-export function setManageTokens(t: ManageTokens): void {
-  _manage = t;
-  sessionStorage.setItem(MANAGE_TOKENS_KEY, JSON.stringify(t));
-}
-
-function clearManage(): void {
-  _manage = null;
-  sessionStorage.removeItem(MANAGE_TOKENS_KEY);
-}
-
-export function loadStoredManage(): ManageTokens | null {
-  const raw = sessionStorage.getItem(MANAGE_TOKENS_KEY);
-  if (!raw) return null;
-  try {
-    const parsed: ManageTokens = JSON.parse(raw);
-    if (
-      typeof parsed.refreshToken === "string" &&
-      typeof parsed.refreshExpiresAt === "number" &&
-      parsed.refreshExpiresAt > Date.now()
-    ) {
-      _manage = parsed;
-      return parsed;
-    }
-  } catch {
-    // fall through
+function api(): PluginApi {
+  if (!_api) {
+    throw new Error("quest-game api used before bootstrapPluginSession resolved");
   }
-  clearManage();
-  return null;
+  return _api;
 }
 
-/**
- * Read the `?token=` param, stripping it from the visible URL so a
- * screenshot can't leak the bearer token (it lives in sessionStorage).
- */
-export function readTokenFromUrl(): string | null {
-  return readAndStripParam("token");
-}
-
-interface JwtClaims {
-  capabilities?: unknown;
-  guildId?: unknown;
-  userId?: unknown;
-  exp?: unknown;
-}
-
-export function decodeJwt(token: string): JwtClaims | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    // base64url → base64
-    const b64 =
-      parts[1].replace(/-/g, "+").replace(/_/g, "/") +
-      "=".repeat((4 - (parts[1].length % 4)) % 4);
-    const json = atob(b64);
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-
-export async function exchangeManageJwt(
-  botJwt: string,
-): Promise<ManageTokens | null> {
-  const res = await fetch(`${API_BASE}/api/manage/exchange`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${botJwt}` },
-  });
-  if (!res.ok) return null;
-  const body = await res.json();
-  if (
-    typeof body?.accessToken !== "string" ||
-    typeof body?.refreshToken !== "string"
-  ) {
-    return null;
-  }
-  return body as ManageTokens;
-}
-
-async function refreshOnce(): Promise<boolean> {
-  if (!_manage) return false;
-  const res = await fetch(`${API_BASE}/api/manage/refresh`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ refreshToken: _manage.refreshToken }),
-  });
-  if (!res.ok) {
-    clearManage();
-    return false;
-  }
-  const body = await res.json();
-  if (
-    typeof body?.accessToken !== "string" ||
-    typeof body?.refreshToken !== "string"
-  ) {
-    return false;
-  }
-  setManageTokens(body as ManageTokens);
-  return true;
-}
-
-/**
- * Multipart upload helper for role artwork. Same auth + transparent
- * refresh as `api()`, just sends the body as FormData with a single
- * `file` part — what the Fastify multipart route on the plugin
- * expects.
- */
-export async function apiUpload<T>(path: string, file: File): Promise<T> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (!_manage) {
-      _onDenied?.("Session expired. Re-run /quest-game manage.");
-      throw new Error("not authenticated");
-    }
-    const fd = new FormData();
-    fd.append("file", file);
-    const res = await fetch(API_BASE + path, {
-      method: "POST",
-      headers: { authorization: `Bearer ${_manage.accessToken}` },
-      body: fd,
-    });
-    if (res.status === 401 && attempt === 0) {
-      const ok = await refreshOnce();
-      if (!ok) {
-        _onDenied?.("Session expired. Re-run /quest-game manage.");
-        throw new Error("session expired");
-      }
-      continue;
-    }
-    if (!res.ok) {
-      let msg = `HTTP ${res.status}`;
-      try {
-        const errBody = await res.json();
-        if (errBody?.error) msg = String(errBody.error);
-      } catch {
-        // keep status
-      }
-      throw new Error(msg);
-    }
-    return res.json() as Promise<T>;
-  }
-  throw new Error("unreachable");
-}
-
-export async function api<T>(
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (!_manage) {
-      _onDenied?.("Session expired. Re-run /quest-game manage in Discord.");
-      throw new Error("not authenticated");
-    }
-    const res = await fetch(API_BASE + path, {
-      method,
-      headers: {
-        authorization: `Bearer ${_manage.accessToken}`,
-        ...(body ? { "content-type": "application/json" } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (res.status === 401 && attempt === 0) {
-      // One transparent refresh, then retry the original request.
-      const ok = await refreshOnce();
-      if (!ok) {
-        _onDenied?.("Session expired. Re-run /quest-game manage.");
-        throw new Error("session expired");
-      }
-      continue;
-    }
-    if (!res.ok) {
-      let msg = `HTTP ${res.status}`;
-      try {
-        const errBody = await res.json();
-        if (errBody?.error) msg = String(errBody.error);
-      } catch {
-        // keep the http status
-      }
-      if (res.status === 403) _onDenied?.(msg);
-      throw new Error(msg);
-    }
-    return res.json() as Promise<T>;
-  }
-  throw new Error("unreachable");
-}
-
-// ── Game-board session ────────────────────────────────────────────
-// The per-player game board uses a different token from the admin
-// panel: a `plugin-session` JWT minted by /quest-game webui that carries
-// no capabilities (authorized purely by its embedded guildId) and
-// lives ~6 h. No exchange / refresh dance — it outlasts a game.
-
-const GAME_SESSION_KEY = "quest-game_game_session";
-
-export interface GameSession {
-  /** The raw plugin-session JWT. */
-  token: string;
-  /** Channel whose game this board shows — from the link's `?c=`. */
+interface GameSession {
   channelId: string;
-  /**
-   * Game instance id — from the link's `?s=`. Pins the board to one
-   * game so a later game in the same channel can't hijack the link.
-   * Empty for legacy links issued before sessionId routing.
-   */
+  /** Empty for legacy links issued before sessionId routing. */
   sessionId: string;
 }
 
@@ -238,28 +42,6 @@ let _game: GameSession | null = null;
 
 export function setGameSession(s: GameSession): void {
   _game = s;
-  sessionStorage.setItem(GAME_SESSION_KEY, JSON.stringify(s));
-}
-
-export function loadStoredGameSession(): GameSession | null {
-  const raw = sessionStorage.getItem(GAME_SESSION_KEY);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as GameSession;
-    if (
-      typeof parsed.token === "string" &&
-      typeof parsed.channelId === "string"
-    ) {
-      // Tolerate a legacy stored session with no sessionId.
-      if (typeof parsed.sessionId !== "string") parsed.sessionId = "";
-      _game = parsed;
-      return parsed;
-    }
-  } catch {
-    // fall through
-  }
-  sessionStorage.removeItem(GAME_SESSION_KEY);
-  return null;
 }
 
 export function currentChannelId(): string | null {
@@ -270,118 +52,88 @@ export function currentSessionId(): string {
   return _game?.sessionId ?? "";
 }
 
-/** Read + strip a query param the webui link carries. */
-function readAndStripParam(name: string): string | null {
-  const value = new URLSearchParams(window.location.search).get(name);
-  if (!value) return null;
-  const url = new URL(window.location.href);
-  url.searchParams.delete(name);
-  window.history.replaceState({}, "", url.toString());
-  return value;
-}
+export { API_BASE };
 
-/** Read + strip the `?c=<channelId>` param. */
-export function readChannelFromUrl(): string | null {
-  return readAndStripParam("c");
-}
-
-/** Read + strip the `?s=<sessionId>` param. */
-export function readSessionFromUrl(): string | null {
-  return readAndStripParam("s");
-}
+// ── Errors ─────────────────────────────────────────────────────────────
+// PluginApi.request rejects with a plain Error on non-2xx; callers that
+// need the HTTP status (404 vs 500 etc.) can still narrow via the
+// message text. `HttpError` is preserved for legacy callers that read
+// the optional `.status` field.
 
 /** An Error carrying the HTTP status that produced it. */
 export interface HttpError extends Error {
   status?: number;
 }
 
-async function gameFetch(
-  method: string,
-  path: string,
-): Promise<Response> {
-  if (!_game) {
-    const err: HttpError = new Error("no game session");
-    err.status = 401;
-    throw err;
-  }
-  return fetch(API_BASE + path, {
-    method,
-    headers: { authorization: `Bearer ${_game.token}` },
-  });
+// ── Manage surface (auto access/refresh handled by SDK) ──────────────
+
+export function manageDelete(path: string): Promise<void> {
+  return api().request<void>("DELETE", path);
 }
 
-/** GET a game-board JSON endpoint with the session bearer token. */
-export async function gameApi<T>(path: string): Promise<T> {
-  const res = await gameFetch("GET", path);
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      if (body?.error) msg = String(body.error);
-    } catch {
-      // keep status
-    }
-    const err: HttpError = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
-  return res.json() as Promise<T>;
+export function manageGet<T>(path: string): Promise<T> {
+  return api().request<T>("GET", path);
+}
+
+export function managePost<T>(path: string, body?: unknown): Promise<T> {
+  return api().request<T>("POST", path, body);
+}
+
+export function manageUpload<T>(path: string, file: File): Promise<T> {
+  return api().upload<T>(path, file);
+}
+
+// ── Game-board surface ────────────────────────────────────────────────
+// Same `api()` handle — the SDK's auth state holds the session JWT
+// after bootstrap, so every `request` carries the right bearer
+// regardless of mode. Helpers below preserve the previous call-site
+// shape so use-game-board.ts / GameBoardView.vue don't have to learn
+// the new wire format.
+
+export function gameApi<T>(path: string): Promise<T> {
+  return api().request<T>("GET", path);
 }
 
 /**
- * Perform a game action (vote, appoint, lake, assassinate, …) from
- * the board. Returns the actor's fresh snapshot; throws an HttpError
- * on failure.
+ * Hard timeout for a player-driven action. A stuck connection must
+ * surface as a failed action the player can retry, never an action
+ * button frozen forever.
  */
+const GAME_ACTION_TIMEOUT_MS = 12_000;
+
 export async function postGameAction(
   action: string,
   extra: { seat?: number; vote?: string },
-): Promise<import("./game-types").GameSnapshotView> {
+): Promise<GameSnapshotView> {
   if (!_game) {
     const err: HttpError = new Error("no game session");
     err.status = 401;
     throw err;
   }
-  // Hard timeout — a stuck connection must surface as a failed action
-  // the player can retry, never an action button frozen forever.
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12_000);
-  let res: Response;
-  try {
-    res = await fetch(`${API_BASE}/api/game/action`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${_game.token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        channel: _game.channelId,
-        session: _game.sessionId,
-        action,
-        ...extra,
-      }),
-      signal: ctrl.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!res.ok) {
-    const err: HttpError = new Error(`HTTP ${res.status}`);
-    err.status = res.status;
-    throw err;
-  }
-  return res.json() as Promise<import("./game-types").GameSnapshotView>;
+  // PluginApi.request doesn't expose abort, so race the timeout at
+  // this layer — the rejection surfaces to the UI; the underlying
+  // fetch is left to settle in the background (it'll either succeed
+  // silently or hit fetch's own ceiling).
+  const request = api().request<GameSnapshotView>("POST", "/api/game/action", {
+    channel: _game.channelId,
+    session: _game.sessionId,
+    action,
+    ...extra,
+  });
+  return Promise.race([
+    request,
+    new Promise<GameSnapshotView>((_, reject) =>
+      setTimeout(() => reject(new Error("Action timed out — please retry.")), GAME_ACTION_TIMEOUT_MS),
+    ),
+  ]);
 }
 
 /** Mint a short-lived SSE ticket (EventSource can't send headers). */
 export async function mintSseTicket(): Promise<string> {
-  const res = await gameFetch("POST", "/api/game/sse-ticket");
-  if (!res.ok) {
-    const err: HttpError = new Error(`HTTP ${res.status}`);
-    err.status = res.status;
-    throw err;
-  }
-  const body = await res.json();
+  const body = await api().request<{ ticket?: string }>(
+    "POST",
+    "/api/game/sse-ticket",
+  );
   if (typeof body?.ticket !== "string") {
     throw new Error("malformed ticket response");
   }
@@ -401,15 +153,26 @@ export function gameSseUrl(
   );
 }
 
-// ── Public manual ─────────────────────────────────────────────────
-// The rules + role manual is unauthenticated reference content.
+// ── Legacy aliases ────────────────────────────────────────────────────
+// Existing call sites (use-art.ts, use-games-poll.ts) imported `api` /
+// `apiUpload` as named functions. Keep the names so the migration
+// touches a single layer.
 
-export async function getManual(): Promise<
-  import("./game-types").ManualData
-> {
+export function api_<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return api().request<T>(method, path, body);
+}
+export { api_ as api };
+
+export function apiUpload<T>(path: string, file: File): Promise<T> {
+  return api().upload<T>(path, file);
+}
+
+// ── Public manual (unauthenticated reference content) ────────────────
+
+export async function getManual(): Promise<ManualData> {
   const res = await fetch(`${API_BASE}/api/manual`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<import("./game-types").ManualData>;
+  return res.json() as Promise<ManualData>;
 }
 
 declare global {
