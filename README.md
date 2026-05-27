@@ -1,3 +1,12 @@
+> [!IMPORTANT]
+> **This repository has moved to [karyl-chan/plugin-quest-game](https://github.com/karyl-chan/plugin-quest-game).**
+> The new location is the source of truth; this fork is archived and no longer maintained.
+>
+> Update your remote:
+> ```
+> git remote set-url origin https://github.com/karyl-chan/plugin-quest-game.git
+> ```
+
 # @karyl-chan/plugin-quest-game
 
 Board-game plugin for karyl-chan: an interactive team-deduction quest
